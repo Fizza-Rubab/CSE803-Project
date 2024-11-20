@@ -174,29 +174,25 @@ img_name = '90785'
 img = np.array(cv2.cvtColor(cv2.imread(f"{img_name}.png"), cv2.COLOR_BGR2RGB))
 img = img/255
 print(f"Img: {img_name}.png, Image shape: {img.shape}")
-total_steps = 11000
+total_steps = 25000
 steps_til_summary = 200
 interpolator_fn = build_2d_sampler(img)
 batch_size = 1024
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = Siren(in_features=2, out_features=4, hidden_features=128, 
+model = Siren(in_features=2, out_features=4, hidden_features=256, 
                 hidden_layers=3, outermost_linear=True).to(device)
 best_loss_combined = float("inf")
 
 
 optim = torch.optim.Adam(lr=1e-4, params=model.parameters())
-# scheduler = torch.optim.lr_scheduler.StepLR(optim, step_size=5000, gamma=0.8)
-
 writer = SummaryWriter(f'runs/{datetime.now().strftime("%Y%m%d-%H%M%S")}')
 print("Training All Integral Field")
 et = time.time()    
 for step in range(total_steps):
     model_input, ground_truth = generate_training_samples_2d(batch_size, interpolator_fn, img)
     out = model(model_input)
-    # print("model input output", model_input.shape, out.shape)
     output = out[:, 3:] * out[:, :3]
-    # print("output", output.shape)
     if loss_type=="l1":
         loss_f = torch.nn.functional.smooth_l1_loss(ground_truth, output)
     elif loss_type=="l2":
@@ -206,47 +202,29 @@ for step in range(total_steps):
     reflectance_grad = grads[:, :3]
     shading_grad = grads[:, 3:]
 
-    # loss = loss_f + 1e-6 * reflectance_grad.abs().sum() + 1e-7 * shading_grad.norm(p=2, dim=-1).mean()
-    loss = loss_f + 1e-9 * reflectance_grad.abs().sum()
+    loss = 2*loss_f + 1e-9 * reflectance_grad.abs().sum()
 
     optim.zero_grad()
     loss.backward()
     optim.step()
-    # scheduler.step()
 
-
-    writer.add_scalar('f loss',
-                        loss_f.item(),
-                        step)
+    writer.add_scalar('f loss', loss_f.item(), step)
     if not step % steps_til_summary:
         print("Step", step, '| combined loss:', loss.item(), '| f loss:', loss_f.item())
+
+    # Ensure 'weights' directory exists
+    os.makedirs("weights", exist_ok=True)
 
     if loss.item() < best_loss_combined:
         torch.save(model.state_dict(), f'weights/siren_{img_name}_{loss_type}.pth')
         best_loss_combined = loss.item()
+        # Save weights and log the best loss
+    os.makedirs("weights", exist_ok=True)  # Ensure 'weights' directory exists
+    if loss.item() < best_loss_combined:
+        torch.save(model.state_dict(), f'weights/siren_{img_name}_{loss_type}.pth')
+        best_loss_combined = loss.item()
 
-    # if step>0 and step % 5000 == 0:
-    #     shape = img.shape
-    #     xy_grid = get_grid(shape[0], shape[1]).to(device)
-    #     generated = model(xy_grid)
-        
-    #     print("albedo: min max", generated[:, :3].min(), generated[:, :3].max())
-    #     print("shading: min max", generated[:, 3:].min(), generated[:, 3:].max())
-
-    #     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        
-    #     axes[0].imshow((generated[:, 3:]*generated[:, :3]).reshape(*shape).cpu().detach().numpy())
-    #     axes[0].set_title("reconstruction")
-
-    #     z = (generated[:, :3] - generated[:, :3].min())/(generated[:, :3].max() - generated[:, :3].min())
-    #     axes[1].imshow((generated[:, :3]).reshape(*shape).cpu().detach().numpy())
-    #     axes[1].set_title("albedo")
-    #     axes[2].imshow((generated[:, 3:]).reshape(shape[0], shape[1], 1).cpu().detach().numpy(), cmap="gray")
-    #     axes[2].set_title("shading")
-    #     plt.savefig("out.png")
-    #     plt.tight_layout()
-    #     plt.show()
-
+# Final Reconstruction and Visualization
 shape = img.shape
 xy_grid = get_grid(shape[0], shape[1]).to(device)
 generated = model(xy_grid)
@@ -257,13 +235,13 @@ print("shading: min max", generated[:, 3:].min(), generated[:, 3:].max())
 fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
 axes[0].imshow((generated[:, 3:]*generated[:, :3]).reshape(*shape).cpu().detach().numpy())
-axes[0].set_title("reconstruction")
+axes[0].set_title("Reconstruction")
 
 z = (generated[:, :3] - generated[:, :3].min())/(generated[:, :3].max() - generated[:, :3].min())
 axes[1].imshow((generated[:, :3]).reshape(*shape).cpu().detach().numpy())
-axes[1].set_title("albedo")
+axes[1].set_title("Albedo")
 axes[2].imshow((generated[:, 3:]).reshape(shape[0], shape[1], 1).cpu().detach().numpy(), cmap="gray")
-axes[2].set_title("shading")
+axes[2].set_title("Shading")
 plt.savefig("out.png")
 plt.tight_layout()
 plt.show()
