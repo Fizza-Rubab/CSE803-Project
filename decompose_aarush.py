@@ -379,10 +379,7 @@ for step in range(total_steps):
     model_input, ground_truth = generate_training_samples_2d(batch_size, interpolator_fn, img)
     out = model(model_input)
     output = out[:, 3:] * out[:, :3]
-<<<<<<< Updated upstream:decompose_aarush.py
-=======
     # output = out[:, 3:] + out[:, :3]
->>>>>>> Stashed changes:decompose.py
     if loss_type=="l1":
         loss_f = torch.nn.functional.smooth_l1_loss(ground_truth, output)
     elif loss_type=="l2":
