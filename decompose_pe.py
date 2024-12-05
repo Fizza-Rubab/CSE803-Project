@@ -16,7 +16,7 @@ from torch.utils.tensorboard import SummaryWriter
 from multiprocessing import Process
 from datetime import datetime
 import cv2
-from networks import CoordinateNet_ordinary
+from networks import CoordinateNet_ordinary, Siren
 
 def map_range(values, old_range, new_range):
     new_width = (new_range[1] - new_range[0])
@@ -31,9 +31,9 @@ def build_2d_sampler(data, method='linear'):
 
 def generate_training_samples_2d(batch_size, interpolator_fn, img, precision=32):
     H, W = img.shape[:2]
-    random_samples_np = np.random.uniform(low=0, high=1, size=[batch_size, 2])
-    sample_coord_x = map_range(random_samples_np[:, 0], (0, 1), (0, H - 1)).reshape(-1,1)
-    sample_coord_y = map_range(random_samples_np[:, 1], (0, 1), (0, W - 1)).reshape(-1,1)
+    random_samples_np = np.random.uniform(low=-1, high=1, size=[batch_size, 2])
+    sample_coord_x = map_range(random_samples_np[:, 0], (-1, 1), (0, H - 1)).reshape(-1,1)
+    sample_coord_y = map_range(random_samples_np[:, 1], (-1, 1), (0, W - 1)).reshape(-1,1)
     sample_coord =  np.concatenate([sample_coord_x, sample_coord_y], axis=1)
     input_tensor = torch.unsqueeze(torch.from_numpy(random_samples_np), 0).cuda()
     bi_sampled = interpolator_fn(sample_coord)
@@ -45,8 +45,8 @@ def generate_training_samples_2d(batch_size, interpolator_fn, img, precision=32)
     return input_tensor.cuda(), rgb_data.cuda()
 
 def get_grid(sidelenx,  sideleny, dim=2):
-    tensors_x = torch.linspace(0, 1, steps=sidelenx)
-    tensors_y = torch.linspace(0, 1, steps=sideleny)
+    tensors_x = torch.linspace(-1, 1, steps=sidelenx)
+    tensors_y = torch.linspace(-1, 1, steps=sideleny)
     tensors = (tensors_x, tensors_y,)
     mgrid = torch.stack(torch.meshgrid(*tensors), dim=-1)
     mgrid = mgrid.reshape(-1, dim)
@@ -60,29 +60,31 @@ def tensor_to_numpy(tensor: torch.Tensor, shape) -> np.ndarray:
     return tensor
 
 loss_type = "l2"
-img_name = 'donuts'
-img = np.array(cv2.cvtColor(cv2.imread(f"{img_name}.jpg"), cv2.COLOR_BGR2RGB))
+img_name = '59290'
+img = np.array(cv2.cvtColor(cv2.imread(f"{img_name}.png"), cv2.COLOR_BGR2RGB))
 img = img/255
 epsilon = 1e-8  # Small constant to avoid log(0)
 img_log = np.log(img + epsilon)  # Apply log transformation
 print(f"Img: {img_name}.jpg, Image shape: {img.shape}")
-total_steps = 100000
+total_steps = 10000
 steps_til_summary = 200
 # interpolator_fn = build_2d_sampler(img)
 interpolator_fn = build_2d_sampler(img)
-batch_size = 4096
+batch_size = 1024
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-model = CoordinateNet_ordinary(4,
-                          "swish",
-                          2,
-                          128,
-                          3,
-                          8).to(device)
+# model = CoordinateNet_ordinary(4,
+#                           "swish",
+#                           2,
+#                           128,
+#                           3,
+#                           8).to(device)
+model = Siren(in_features=2, out_features=4, hidden_features=128, 
+                hidden_layers=4, outermost_linear=True, weight_norm=True).to(device)
 best_loss_combined = float("inf")
 
 
-optim = torch.optim.Adam(lr=1e-3, params=model.parameters())
+optim = torch.optim.Adam(lr=1e-4, params=model.parameters())
 
 writer = SummaryWriter(f'runs/{datetime.now().strftime("%Y%m%d-%H%M%S")}')
 print("Training All Integral Field")
@@ -91,18 +93,31 @@ for step in range(total_steps):
     model_input, ground_truth = generate_training_samples_2d(batch_size, interpolator_fn, img)
     out = model(model_input)
     output = out[:, 3:] * out[:, :3]
-    # output = out[:, 3:] + out[:, :3]
     if loss_type=="l1":
         loss_f = torch.nn.functional.smooth_l1_loss(ground_truth, output)
     elif loss_type=="l2":
         loss_f = (((ground_truth - output))**2).mean()
 
-    # grads = (vmap(jacrev(jacfwd(lambda a, b: model(torch.cat([a, b], -1)), argnums=0), argnums=1))(model_input[:, :1], model_input[:, 1:])).reshape(-1, 4)
-    # reflectance_grad = grads[:, :3]
-    # shading_grad = grads[:, 3:]
+    # image_chromaticity = ground_truth / (ground_truth.norm(dim=-1, keepdim=True) + 1e-8)  # C_I(x, y)
+    # reflectance_chromaticity = out[:, :3] / (out[:, :3].norm(dim=-1, keepdim=True) + 1e-8)  # C_R(x, y)
+    # chromaticity_loss = ((image_chromaticity - reflectance_chromaticity) ** 2).mean()
 
-    # loss = loss_f + 1e-10 * shading_grad.norm(p=2, dim=-1).mean()
-    loss = loss_f 
+    # Shading non-negativity loss
+    shading_non_negativity_loss = torch.relu(-out[:, 3:]).pow(2).mean()
+    reflectance_non_negativity_loss = torch.relu(-out[:, :3]).pow(2).mean()
+    shadinggreyscale = ((out[:, 3:] - ground_truth.mean(axis=-1).unsqueeze(-1))**2).mean()
+    # print(out[:, 3:].shape, ground_truth.mean(axis=-1).unsqueeze(-1).shape)
+    grads = (vmap(jacrev(jacfwd(lambda a, b: model(torch.cat([a, b], -1)), argnums=0), argnums=1))(model_input[:, :1], model_input[:, 1:])).reshape(-1, 4)
+    reflectance_grad = grads[:, :3]
+    shading_grad = grads[:, 3:]
+
+    threshold = 0.1  # Adjust as needed based on your dataset
+    reflectance_grad_mag = reflectance_grad.norm(p=2, dim=-1)  # Gradient magnitude
+    sparsity_loss = torch.relu(threshold - reflectance_grad_mag).mean()
+
+    # loss = loss_f + 1e-10 * shading_grad.norm(p=2, dim=-1)
+    loss = loss_f + 1e-4 * sparsity_loss 
+    # loss = loss_f 
 
     optim.zero_grad()
     loss.backward()
