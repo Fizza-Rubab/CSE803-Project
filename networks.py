@@ -619,7 +619,7 @@ class Siren(nn.Module):
             param.required_grad = True
 
     def forward(self, model_input):
-        return self.net(model_input)
+        return torch.relu(self.net(model_input))
 
     def forward_with_activations(self, model_input, retain_grad=False):
         '''Returns not only model output, but also intermediate activations.
