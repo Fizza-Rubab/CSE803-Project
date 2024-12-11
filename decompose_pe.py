@@ -62,7 +62,7 @@ def tensor_to_numpy(tensor: torch.Tensor, shape) -> np.ndarray:
 
 loss_type = "l2"
 img_path = r'dataset\Multi-Illumination'
-img_name = r'everett_dining1_dir_0_mip2'
+img_name = r'everett_lobby12_dir_0_mip2'
 img = cv2.cvtColor(cv2.imread(f"{os.path.join(img_path, img_name)}.jpg"), cv2.COLOR_BGR2RGB)
 print(img.shape)
 img = cv2.resize(img, (int(img.shape[1]/3), int(img.shape[0]/3)), interpolation=cv2.INTER_AREA)
@@ -71,7 +71,7 @@ img = np.array(img)/255
 epsilon = 1e-8  # Small constant to avoid log(0)
 img_log = np.log(img + epsilon)  # Apply log transformation
 print(f"Img: {img_name}.jpg, Image shape: {img.shape}")
-total_steps = 1000
+total_steps = 15000
 steps_til_summary = 200
 # interpolator_fn = build_2d_sampler(img)
 interpolator_fn = build_2d_sampler(img)
@@ -114,7 +114,8 @@ for step in range(total_steps):
 
     reflectance_grad = torch.autograd.grad(albedo.abs().sum(), model_input,  create_graph=True)[0]
     reflectance_grad_mag = reflectance_grad.norm(p=2, dim=-1)
-    loss = loss_f + 0.1 * chromaticity_loss + 0.1*shading_non_negativity_loss +  5e-6*(reflectance_grad_mag).mean()
+    # loss = loss_f + 0.1 * chromaticity_loss + 0.1*shading_non_negativity_loss +  5e-7*(reflectance_grad_mag).mean()
+    loss = loss_f
 
     optim.zero_grad()
     loss.backward()
@@ -139,17 +140,17 @@ fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 z = generated[:, 3:]*generated[:, :3]
 axes[0].imshow((z).reshape(*shape).cpu().detach().numpy())
 axes[0].set_title("reconstruction")
-cv2.imwrite(fr"results\Multi-Illumination\Priors\{img_name}.png", 255*cv2.cvtColor((z).reshape(*shape).cpu().detach().numpy(), cv2.COLOR_BGR2RGB))
+cv2.imwrite(fr"results\Multi-Illumination\Naive\{img_name}.png", 255*cv2.cvtColor((z).reshape(*shape).cpu().detach().numpy(), cv2.COLOR_BGR2RGB))
 
 z = generated[:, :3]
 axes[1].imshow((z).reshape(*shape).cpu().detach().numpy())
 axes[1].set_title("albedo")
-cv2.imwrite(fr"results\Multi-Illumination\Priors\{img_name}_reflectance.png", 255*cv2.cvtColor((z).reshape(*shape).cpu().detach().numpy(), cv2.COLOR_BGR2RGB))
+cv2.imwrite(fr"results\Multi-Illumination\Naive\{img_name}_reflectance.png", 255*cv2.cvtColor((z).reshape(*shape).cpu().detach().numpy(), cv2.COLOR_BGR2RGB))
 
 z = generated[:, 3:]
 axes[2].imshow((z).reshape(shape[0], shape[1], 1).cpu().detach().numpy(), cmap="gray")
 axes[2].set_title("shading")
-cv2.imwrite(fr"results\Multi-Illumination\Priors\{img_name}_shading.png", 255*(z).reshape(shape[0], shape[1], 1).cpu().detach().numpy())
-plt.savefig(fr"results/Multi-Illumination/Priors/{img_name}_combined.png")
+cv2.imwrite(fr"results\Multi-Illumination\Naive\{img_name}_shading.png", 255*(z).reshape(shape[0], shape[1], 1).cpu().detach().numpy())
+plt.savefig(fr"results/Multi-Illumination/Naive/{img_name}_combined.png")
 plt.tight_layout()
 plt.show()
