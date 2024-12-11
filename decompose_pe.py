@@ -17,6 +17,7 @@ from multiprocessing import Process
 from datetime import datetime
 import cv2
 from networks import CoordinateNet_ordinary, Siren
+from torch.autograd import grad
 
 def map_range(values, old_range, new_range):
     new_width = (new_range[1] - new_range[0])
@@ -60,17 +61,18 @@ def tensor_to_numpy(tensor: torch.Tensor, shape) -> np.ndarray:
     return tensor
 
 loss_type = "l2"
-img_name = '59290'
-img = np.array(cv2.cvtColor(cv2.imread(f"{img_name}.png"), cv2.COLOR_BGR2RGB))
+img_path = r'dataset\IIW'
+img_name = r'lady'
+img = np.array(cv2.cvtColor(cv2.imread(f"{os.path.join(img_path, img_name)}.jpg"), cv2.COLOR_BGR2RGB))
 img = img/255
 epsilon = 1e-8  # Small constant to avoid log(0)
 img_log = np.log(img + epsilon)  # Apply log transformation
 print(f"Img: {img_name}.jpg, Image shape: {img.shape}")
-total_steps = 10000
+total_steps = 20000
 steps_til_summary = 200
 # interpolator_fn = build_2d_sampler(img)
 interpolator_fn = build_2d_sampler(img)
-batch_size = 1024
+batch_size = 4096
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 # model = CoordinateNet_ordinary(4,
@@ -79,6 +81,7 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 #                           128,
 #                           3,
 #                           8).to(device)
+
 model = Siren(in_features=2, out_features=4, hidden_features=128, 
                 hidden_layers=4, outermost_linear=True, weight_norm=True).to(device)
 best_loss_combined = float("inf")
@@ -91,33 +94,24 @@ print("Training All Integral Field")
 et = time.time()    
 for step in range(total_steps):
     model_input, ground_truth = generate_training_samples_2d(batch_size, interpolator_fn, img)
+    model_input.requires_grad_(True)
+
     out = model(model_input)
-    output = out[:, 3:] * out[:, :3]
+    albedo, shading = torch.split(out, 3, dim=-1)
+    reconstruction = albedo * shading
     if loss_type=="l1":
-        loss_f = torch.nn.functional.smooth_l1_loss(ground_truth, output)
+        loss_f = torch.nn.functional.smooth_l1_loss(ground_truth, reconstruction)
     elif loss_type=="l2":
-        loss_f = (((ground_truth - output))**2).mean()
+        loss_f = F.mse_loss(reconstruction, ground_truth)
 
-    # image_chromaticity = ground_truth / (ground_truth.norm(dim=-1, keepdim=True) + 1e-8)  # C_I(x, y)
-    # reflectance_chromaticity = out[:, :3] / (out[:, :3].norm(dim=-1, keepdim=True) + 1e-8)  # C_R(x, y)
-    # chromaticity_loss = ((image_chromaticity - reflectance_chromaticity) ** 2).mean()
+    image_chromaticity = ground_truth / (ground_truth.norm(dim=-1, keepdim=True) + 1e-8)
+    albedo_chromaticity = albedo / (albedo.norm(dim=-1, keepdim=True) + 1e-8)
+    chromaticity_loss = ((image_chromaticity - albedo_chromaticity) ** 2).mean()
+    shading_non_negativity_loss = torch.relu(-shading).pow(2).mean()
 
-    # Shading non-negativity loss
-    shading_non_negativity_loss = torch.relu(-out[:, 3:]).pow(2).mean()
-    reflectance_non_negativity_loss = torch.relu(-out[:, :3]).pow(2).mean()
-    shadinggreyscale = ((out[:, 3:] - ground_truth.mean(axis=-1).unsqueeze(-1))**2).mean()
-    # print(out[:, 3:].shape, ground_truth.mean(axis=-1).unsqueeze(-1).shape)
-    grads = (vmap(jacrev(jacfwd(lambda a, b: model(torch.cat([a, b], -1)), argnums=0), argnums=1))(model_input[:, :1], model_input[:, 1:])).reshape(-1, 4)
-    reflectance_grad = grads[:, :3]
-    shading_grad = grads[:, 3:]
-
-    threshold = 0.1  # Adjust as needed based on your dataset
-    reflectance_grad_mag = reflectance_grad.norm(p=2, dim=-1)  # Gradient magnitude
-    sparsity_loss = torch.relu(threshold - reflectance_grad_mag).mean()
-
-    # loss = loss_f + 1e-10 * shading_grad.norm(p=2, dim=-1)
-    loss = loss_f + 1e-4 * sparsity_loss 
-    # loss = loss_f 
+    reflectance_grad = torch.autograd.grad(albedo.abs().sum(), model_input,  create_graph=True)[0]
+    reflectance_grad_mag = reflectance_grad.norm(p=2, dim=-1)
+    loss = loss_f + 0.1 * chromaticity_loss + 0.1*shading_non_negativity_loss +  5e-6*(reflectance_grad_mag).mean()
 
     optim.zero_grad()
     loss.backward()
@@ -130,14 +124,9 @@ for step in range(total_steps):
     if not step % steps_til_summary:
         print("Step", step, '| combined loss:', loss.item(), '| f loss:', loss_f.item())
 
-    # if loss.item() < best_loss_combined:
-    #     torch.save(model.state_dict(), f'weights/siren_{img_name}_{loss_type}.pth')
-    #     best_loss_combined = loss.item()
-
 shape = img.shape
 xy_grid = get_grid(shape[0], shape[1]).to(device)
 generated = model(xy_grid)
-# generated = torch.exp(generated) - epsilon 
 
 print("albedo: min max", generated[:, :3].min(), generated[:, :3].max())
 print("shading: min max", generated[:, 3:].min(), generated[:, 3:].max())
@@ -145,19 +134,19 @@ print("shading: min max", generated[:, 3:].min(), generated[:, 3:].max())
 fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
 z = generated[:, 3:]*generated[:, :3]
-# z = (z - z.min())/(z.max() - z.min())
 axes[0].imshow((z).reshape(*shape).cpu().detach().numpy())
 axes[0].set_title("reconstruction")
+cv2.imwrite(fr"results\IIW\Priors\{img_name}.png", 255*cv2.cvtColor((z).reshape(*shape).cpu().detach().numpy(), cv2.COLOR_BGR2RGB))
 
 z = generated[:, :3]
-# z = (z - z.min())/(z.max() - z.min())
 axes[1].imshow((z).reshape(*shape).cpu().detach().numpy())
 axes[1].set_title("albedo")
+cv2.imwrite(fr"results\IIW\Priors\{img_name}_reflectance.png", 255*cv2.cvtColor((z).reshape(*shape).cpu().detach().numpy(), cv2.COLOR_BGR2RGB))
 
 z = generated[:, 3:]
-# z = (z - z.min())/(z.max() - z.min())
 axes[2].imshow((z).reshape(shape[0], shape[1], 1).cpu().detach().numpy(), cmap="gray")
 axes[2].set_title("shading")
-plt.savefig("outdpe.png")
+cv2.imwrite(fr"results\IIW\Priors\{img_name}_shading.png", 255*(z).reshape(shape[0], shape[1], 1).cpu().detach().numpy())
+plt.savefig(fr"results/IIW/Priors/{img_name}_combined.png")
 plt.tight_layout()
 plt.show()
