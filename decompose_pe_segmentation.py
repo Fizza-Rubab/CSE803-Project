@@ -64,17 +64,18 @@ def tensor_to_numpy(tensor: torch.Tensor, shape) -> np.ndarray:
     return tensor
 
 loss_type = "l2"
-for img_name in ["bedroom", "hotel", "lady", "tv", "kitchen"]:
+for img_name in ["kitchen", "bedroom", "hotel", "tv", "lady"]:
+    print("Image:", img_name)
     img_path = fr'dataset\IIW\{img_name}.jpg'
     seg_path = fr'results\IIW\Segmentation\{img_name}_reflectance.png'
-    img = np.array(cv2.cvtColor(cv2.imread(f"{img_path}"), cv2.COLOR_BGR2RGB))
+    img = cv2.cvtColor(cv2.imread(f"{img_path}"), cv2.COLOR_BGR2RGB)
+    # img = np.array(cv2.resize(img, (int(img.shape[1]/3), int(img.shape[0]/3)), interpolation=cv2.INTER_AREA))
     seg_img = np.array(cv2.cvtColor(cv2.imread(f"{seg_path}"), cv2.COLOR_BGR2RGB))
-    img = img/255
+    img = np.array(img)/255
     seg_img = seg_img/255
     epsilon = 1e-8  # Small constant to avoid log(0)
     img_log = np.log(img + epsilon)  # Apply log transformation
-    print(f"Img: {img_path}, Image shape: {img.shape}")
-    total_steps = 100000
+    total_steps = 20000
     steps_til_summary = 200
     # interpolator_fn = build_2d_sampler(img)
     interpolator_fn = build_2d_sampler(img)
@@ -83,18 +84,18 @@ for img_name in ["bedroom", "hotel", "lady", "tv", "kitchen"]:
     batch_size = 1024
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    model = CoordinateNet_ordinary(4,
-                            "swish",
-                            2,
-                            128,
-                            3,
-                            8).to(device)
-    # model = Siren(in_features=2, out_features=4, hidden_features=128, 
-    #                 hidden_layers=4, outermost_linear=True, weight_norm=True).to(device)
+    # model = CoordinateNet_ordinary(4,
+    #                         "swish",
+    #                         2,
+    #                         128,
+    #                         3,
+    #                         8).to(device)
+    model = Siren(in_features=2, out_features=4, hidden_features=128, 
+                    hidden_layers=4, outermost_linear=True, weight_norm=True).to(device)
     best_loss_combined = float("inf")
 
 
-    optim = torch.optim.Adam(lr=1e-3, params=model.parameters())
+    optim = torch.optim.Adam(lr=1e-4, params=model.parameters())
 
     writer = SummaryWriter(f'runs/{datetime.now().strftime("%Y%m%d-%H%M%S")}')
     print("Training All Integral Field")
@@ -108,26 +109,7 @@ for img_name in ["bedroom", "hotel", "lady", "tv", "kitchen"]:
         elif loss_type=="l2":
             loss_f = (((ground_truth - output))**2).mean()
         segloss = (((ground_truth2 - out[:, :3]))**2).mean()
-        # image_chromaticity = ground_truth / (ground_truth.norm(dim=-1, keepdim=True) + 1e-8)  # C_I(x, y)
-        # reflectance_chromaticity = out[:, :3] / (out[:, :3].norm(dim=-1, keepdim=True) + 1e-8)  # C_R(x, y)
-        # chromaticity_loss = ((image_chromaticity - reflectance_chromaticity) ** 2).mean()
-
-        # Shading non-negativity loss
-        # shading_non_negativity_loss = torch.relu(-out[:, 3:]).pow(2).mean()
-        # reflectance_non_negativity_loss = torch.relu(-out[:, :3]).pow(2).mean()
-        # shadinggreyscale = ((out[:, 3:] - ground_truth.mean(axis=-1).unsqueeze(-1))**2).mean()
-        # # print(out[:, 3:].shape, ground_truth.mean(axis=-1).unsqueeze(-1).shape)
-        # grads = (vmap(jacrev(jacfwd(lambda a, b: model(torch.cat([a, b], -1)), argnums=0), argnums=1))(model_input[:, :1], model_input[:, 1:])).reshape(-1, 4)
-        # reflectance_grad = grads[:, :3]
-        # shading_grad = grads[:, 3:]
-
-        # threshold = 0.2  # Adjust as needed based on your dataset
-        # reflectance_grad_mag = reflectance_grad.norm(p=2, dim=-1)  # Gradient magnitude
-        # sparsity_loss = torch.relu(threshold - reflectance_grad_mag).mean()
-
-        # loss = loss_f + 1e-10 * shading_grad.norm(p=2, dim=-1)
-        # loss = loss_f + 0.1 * sparsity_loss 
-        loss = loss_f +  0.9*segloss
+        loss = loss_f +  0.1*segloss
 
         optim.zero_grad()
         loss.backward()
@@ -140,14 +122,10 @@ for img_name in ["bedroom", "hotel", "lady", "tv", "kitchen"]:
         if not step % steps_til_summary:
             print("Step", step, '| combined loss:', loss.item(), '| f loss:', loss_f.item())
 
-        # if loss.item() < best_loss_combined:
-        #     torch.save(model.state_dict(), f'weights/siren_{img_name}_{loss_type}.pth')
-        #     best_loss_combined = loss.item()
 
     shape = img.shape
     xy_grid = get_grid(shape[0], shape[1]).to(device)
     generated = model(xy_grid)
-    # generated = torch.exp(generated) - epsilon 
 
     print("albedo: min max", generated[:, :3].min(), generated[:, :3].max())
     print("shading: min max", generated[:, 3:].min(), generated[:, 3:].max())
@@ -155,6 +133,7 @@ for img_name in ["bedroom", "hotel", "lady", "tv", "kitchen"]:
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
 
     z = generated[:, 3:]*generated[:, :3]
+    cv2.imwrite(fr"results\IIW\Combined\{img_name}.png", 255*cv2.cvtColor((z).reshape(*shape).cpu().detach().numpy(), cv2.COLOR_BGR2RGB))
     # z = (z - z.min())/(z.max() - z.min())
     axes[0].imshow((z).reshape(*shape).cpu().detach().numpy())
     axes[0].set_title("reconstruction")
@@ -170,6 +149,6 @@ for img_name in ["bedroom", "hotel", "lady", "tv", "kitchen"]:
     cv2.imwrite(fr"results\IIW\Combined\{img_name}_shading.png", 255*(z).reshape(shape[0], shape[1], 1).cpu().detach().numpy())
     axes[2].imshow((z).reshape(shape[0], shape[1], 1).cpu().detach().numpy(), cmap="gray")
     axes[2].set_title("shading")
-    plt.savefig("outdpe.png")
-    # plt.tight_layout()
-    # plt.show()
+    plt.savefig(fr"results\IIW\Combined\{img_name}_combined.png")
+    plt.tight_layout()
+    plt.show()
